@@ -10,7 +10,7 @@
 # Usage: check_flight_binary.sh PROGRAM
 
 # Names that exist only in test code. A new test-only class must be added here.
-TEST_ONLY_NAMES='LoopbackTransport'
+TEST_ONLY_NAMES='LoopbackTransport|PseudoTerminal'
 
 # Positive control: a name every flight program contains. If the search cannot
 # see this, it cannot see test code either, so the check proves nothing.

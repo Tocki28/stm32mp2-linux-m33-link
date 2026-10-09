@@ -1,12 +1,17 @@
 # Editor (clangd) settings: tell the editor what the Makefile tells the compiler.
+# Each -I path is relative to the edited file's own folder.
 CompileFlags:
   Add: [-std=c++17]
 ---
-# Test files: like the test build, they see flight/ and define LINK_TEST_BUILD
-# (guard 1, see test/loopback_transport.hpp). Without this the editor would not find
-# the flight headers, and would show the guard's #error.
-# The -I path is relative to the file's own folder (test/).
+# Flight code: sees config/, fsw/inc/ and fsw/src/, like the flight build.
 If:
-  PathMatch: test/.*
+  PathMatch: fsw/(inc|src)/.*
 CompileFlags:
-  Add: [-DLINK_TEST_BUILD, -I../flight]
+  Add: [-I../../config, -I../inc, -I../src]
+---
+# Test code: also sees ut-stubs/ and ut-coverage/, and defines LINK_TEST_BUILD
+# (guard 1). Without this the editor would show the guard's #error in them.
+If:
+  PathMatch: ut-(coverage|stubs)/.*
+CompileFlags:
+  Add: [-DLINK_TEST_BUILD, -I../config, -I../fsw/inc, -I../fsw/src, -I../ut-stubs, -I../ut-coverage]

@@ -1,41 +1,49 @@
 # Build, check and run the link test.
 #   make            build both programs for this Mac, into build/
 #   make test       build the test program and run it (fake channel, no hardware)
+#   make coverage   run the tests and report which flight lines and branches they ran
 #   make analyze    static analysis of both programs: clang analyzer + cppcheck
 #   make image      create the Docker build image from docker/Dockerfile (once)
 #   make board      build the flight program for the STM32MP2 (64-bit ARM Linux), in Docker
 #   make deploy     build the flight program for the board and copy it there (/tmp/link_test_arm64)
 #   make clean      delete everything built
 
-# Folders:
-#   flight/   everything that runs on the board
-#   test/     test-only code: runs on this Mac, never on the board
-#   tools/    scripts the build runs
-#   docker/   the 64-bit ARM Linux build environment (make image)
-#   build/    built programs; make clean deletes it, make rebuilds it
-FLIGHT_DIR = flight
-TEST_DIR   = test
+# Folders, laid out like a module of NASA's core Flight Executive (cFE):
+#   config/        every setting, each with its reason
+#   fsw/inc/       flight software, public: what code outside this module may include
+#   fsw/src/       flight software, private: the code and its own headers
+#   ut-coverage/   unit tests of the flight code, plus their helpers; Mac only
+#   ut-stubs/      fakes that stand in for the layer below; Mac only
+#   tools/         scripts the build runs
+#   docker/        the 64-bit ARM Linux build environment (make image)
+#   build/         built programs; make clean deletes it, make rebuilds it
+CONFIG_DIR = config
+INC_DIR    = fsw/inc
+SRC_DIR    = fsw/src
+UT_DIR     = ut-coverage
+STUB_DIR   = ut-stubs
 BUILD_DIR  = build
 
-# Two programs from the same shared files:
-#   link_test   FLIGHT program: flight/ only, real rpmsg channel. Runs on the board.
-#   unit_test   TEST program: the shared logic from flight/ plus test/, fake channel.
-#               Runs on this Mac, never on the board.
-SHARED = $(FLIGHT_DIR)/echo_test.cpp $(FLIGHT_DIR)/status.cpp
-FLIGHT = $(FLIGHT_DIR)/main.cpp $(FLIGHT_DIR)/rpmsg_port.cpp $(SHARED)
-TEST   = $(TEST_DIR)/test_main.cpp $(TEST_DIR)/loopback_transport.cpp $(SHARED)
-FLIGHT_HEADERS = $(wildcard $(FLIGHT_DIR)/*.hpp)
-TEST_HEADERS   = $(wildcard $(TEST_DIR)/*.hpp)
+# Two programs from the same flight files:
+#   link_test   FLIGHT program: fsw/ and config/ only, real rpmsg channel. Runs on the board.
+#   unit_test   TEST program: every flight file except main.cpp, plus ut-coverage/ and
+#               ut-stubs/. Runs on this Mac, never on the board.
+# SHARED is found automatically, so a new flight file is tested without editing this list.
+SHARED = $(filter-out $(SRC_DIR)/main.cpp,$(wildcard $(SRC_DIR)/*.cpp))
+FLIGHT = $(SRC_DIR)/main.cpp $(SHARED)
+TEST   = $(wildcard $(UT_DIR)/*.cpp) $(wildcard $(STUB_DIR)/*.cpp) $(SHARED)
+FLIGHT_HEADERS = $(wildcard $(CONFIG_DIR)/*.hpp $(INC_DIR)/*.hpp $(SRC_DIR)/*.hpp)
+TEST_HEADERS   = $(wildcard $(UT_DIR)/*.hpp $(STUB_DIR)/*.hpp)
 
-# Which folders each build may include from. The flight build is given only flight/,
-# so it cannot even find a test-only header by name.
-FLIGHT_INCLUDES = -I$(FLIGHT_DIR)
-TEST_INCLUDES   = -I$(FLIGHT_DIR) -I$(TEST_DIR)
+# Which folders each build may include from. The flight build is not given the test
+# folders, so it cannot even find a test-only header by name.
+FLIGHT_INCLUDES = -I$(CONFIG_DIR) -I$(INC_DIR) -I$(SRC_DIR)
+TEST_INCLUDES   = $(FLIGHT_INCLUDES) -I$(STUB_DIR) -I$(UT_DIR)
 
 # Two more guards keep test code out of the flight program, whatever route it takes
-# (for example an include written with a path, like "../test/..."):
+# (for example an include written with a path, like "../../ut-stubs/..."):
 #   guard 1  test-only headers refuse to compile unless this is defined, and only the
-#            test build defines it (see test/loopback_transport.hpp)
+#            test build defines it (see ut-stubs/loopback_transport.hpp)
 #   guard 2  every finished flight program is searched for test code and deleted if
 #            any is found (see tools/check_flight_binary.sh)
 TEST_BUILD = -DLINK_TEST_BUILD
@@ -66,6 +74,16 @@ $(BUILD_DIR)/unit_test: $(TEST) $(FLIGHT_HEADERS) $(TEST_HEADERS) | $(BUILD_DIR)
 test: $(BUILD_DIR)/unit_test
 	./$(BUILD_DIR)/unit_test
 
+# Coverage, as cFE measures it: build the tests with counters in every line and
+# branch, run them, then report how much of each flight file they ran.
+coverage: | $(BUILD_DIR)
+	clang++ $(FLAGS) $(TEST_BUILD) $(TEST_INCLUDES) -fprofile-instr-generate -fcoverage-mapping \
+	  -o $(BUILD_DIR)/unit_test_coverage $(TEST)
+	LLVM_PROFILE_FILE=$(BUILD_DIR)/unit_test.profraw ./$(BUILD_DIR)/unit_test_coverage > /dev/null 2>&1
+	xcrun llvm-profdata merge -o $(BUILD_DIR)/unit_test.profdata $(BUILD_DIR)/unit_test.profraw
+	xcrun llvm-cov report $(BUILD_DIR)/unit_test_coverage \
+	  -instr-profile=$(BUILD_DIR)/unit_test.profdata $(SHARED)
+
 analyze:
 	clang++ -std=c++17 --analyze -Xanalyzer -analyzer-output=text $(FLIGHT_INCLUDES) $(FLIGHT)
 	clang++ -std=c++17 --analyze -Xanalyzer -analyzer-output=text $(TEST_BUILD) $(TEST_INCLUDES) $(TEST)
@@ -75,13 +93,13 @@ analyze:
 	  --inline-suppr --error-exitcode=1 --quiet $(TEST_BUILD) $(TEST_INCLUDES) $(TEST)
 	rm -f *.plist
 
+image:
+	docker build --platform linux/arm64 -t $(IMAGE) docker
+
 $(BUILD_DIR)/link_test_arm64: $(FLIGHT) $(FLIGHT_HEADERS) | $(BUILD_DIR)
 	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/src $(IMAGE) \
 	  g++ $(FLAGS) $(FLIGHT_INCLUDES) -static -o $@ $(FLIGHT)
 	$(CHECK_FLIGHT) $@
-
-image:
-	docker build --platform linux/arm64 -t $(IMAGE) docker
 
 board: $(BUILD_DIR)/link_test_arm64
 
@@ -91,4 +109,4 @@ deploy: $(BUILD_DIR)/link_test_arm64
 clean:
 	rm -rf $(BUILD_DIR) *.plist
 
-.PHONY: all test analyze image board deploy clean
+.PHONY: all test coverage analyze image board deploy clean
