@@ -1,0 +1,5 @@
+# built programs: make rebuilds them
+build/
+# clang static analyzer reports
+*.plist
+.DS_Store
