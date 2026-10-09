@@ -1,6 +1,7 @@
 # Build, check and run the link test.
 #   make            build both programs for this Mac, into build/
 #   make test       build the test program and run it (fake channel, no hardware)
+#   make test-arm   build the test program for 64-bit ARM and run it under QEMU, in Docker
 #   make coverage   run the tests and report which flight lines and branches they ran
 #   make analyze    static analysis of both programs: clang analyzer + cppcheck
 #   make image      create the Docker build image from docker/Dockerfile (once)
@@ -56,8 +57,19 @@ WARNINGS = -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow \
 # No exceptions and no run-time type information: errors travel as Status values.
 FLAGS = -std=c++17 -O2 -fno-exceptions -fno-rtti $(WARNINGS)
 
+# The board: STM32MP257F-DK. Its Linux runs on a Cortex-A35, a 64-bit ARM processor
+# (aarch64). This Mac is Intel, so the board build runs inside a 64-bit ARM Linux
+# container that QEMU emulates, and g++ is told exactly which processor to compile for.
+#   BOARD_PLATFORM  the processor and system QEMU emulates for the container
+#   BOARD_CPU       the processor g++ generates code for (-mcpu)
+#   BOARD_FILE_TYPE what `file` must report for a finished board program
+BOARD_PLATFORM = linux/arm64
+BOARD_CPU = cortex-a35
+BOARD_FILE_TYPE = ARM aarch64
+
 BOARD = root@192.168.7.1
 IMAGE = stm32mp2-arm64-build
+DOCKER_RUN = docker run --rm --platform $(BOARD_PLATFORM) -v "$(CURDIR)":/src $(IMAGE)
 
 all: $(BUILD_DIR)/link_test $(BUILD_DIR)/unit_test
 
@@ -94,12 +106,22 @@ analyze:
 	rm -f *.plist
 
 image:
-	docker build --platform linux/arm64 -t $(IMAGE) docker
+	docker build --platform $(BOARD_PLATFORM) -t $(IMAGE) docker
 
+# The flight program for the board: compiled for BOARD_CPU, then checked twice before
+# it may be deployed: it must be an ARM program, and it must contain no test code.
 $(BUILD_DIR)/link_test_arm64: $(FLIGHT) $(FLIGHT_HEADERS) | $(BUILD_DIR)
-	docker run --rm --platform linux/arm64 -v "$(CURDIR)":/src $(IMAGE) \
-	  g++ $(FLAGS) $(FLIGHT_INCLUDES) -static -o $@ $(FLIGHT)
+	$(DOCKER_RUN) g++ $(FLAGS) -mcpu=$(BOARD_CPU) $(FLIGHT_INCLUDES) -static -o $@ $(FLIGHT)
+	file $@ | grep -q "$(BOARD_FILE_TYPE)" || { echo "not a $(BOARD_FILE_TYPE) program: $@ deleted" >&2; rm -f $@; exit 1; }
 	$(CHECK_FLIGHT) $@
+
+# The same unit tests, run on 64-bit ARM: QEMU emulates the processor, so this catches
+# code that behaves differently on ARM than on this Intel Mac. There is no M33 here:
+# the tests use the fakes, as on the Mac. Times measured under QEMU mean nothing.
+test-arm: | $(BUILD_DIR)
+	$(DOCKER_RUN) g++ $(FLAGS) -mcpu=$(BOARD_CPU) $(TEST_BUILD) $(TEST_INCLUDES) \
+	  -o $(BUILD_DIR)/unit_test_arm64 $(TEST)
+	$(DOCKER_RUN) ./$(BUILD_DIR)/unit_test_arm64
 
 board: $(BUILD_DIR)/link_test_arm64
 
@@ -109,4 +131,4 @@ deploy: $(BUILD_DIR)/link_test_arm64
 clean:
 	rm -rf $(BUILD_DIR) *.plist
 
-.PHONY: all test coverage analyze image board deploy clean
+.PHONY: all test test-arm coverage analyze image board deploy clean
